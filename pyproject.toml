@@ -52,6 +52,13 @@ chroma = "mempalace.backends.chroma:ChromaBackend"
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9"]
 spellcheck = ["autocorrect>=2.0"]
+# Chinese word segmentation for BM25 (searcher.py). Without this, CJK queries
+# fall back to Latin-regex tokenisation and BM25 re-ranking silently degrades.
+chinese = ["jieba>=0.42"]
+# Jina v5 nano multilingual embedding backend (backends/chroma.py). Loaded
+# lazily; only required when ``embedding_model`` points at a ``jinaai/...``
+# checkpoint in the palace metadata.
+jina = ["transformers>=4.57.0", "torch>=2.1.0"]
 
 [dependency-groups]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9"]

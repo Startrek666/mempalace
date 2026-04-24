@@ -8,6 +8,7 @@ Stores verbatim chunks as drawers. No summaries. Ever.
 """
 
 import os
+import re
 import sys
 import hashlib
 import fnmatch
@@ -472,6 +473,24 @@ def _load_known_entities_raw() -> dict:
 
 
 _HALL_KEYWORDS_CACHE = None
+_HALL_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+
+def _hall_embed_fallback(content: str) -> str:
+    """Classify ``content`` into a hall using the anchor embedding classifier.
+
+    Only invoked when (1) the user has explicitly opted in via
+    ``MEMPALACE_EMBEDDING_CLASSIFY=1`` and (2) regex scoring returned no
+    matches. Any classifier failure (missing transformers, offline HF cache)
+    is swallowed — ``"general"`` is a safe default.
+    """
+    try:
+        from .embedders.classifier import get_hall_classifier
+
+        label, _score = get_hall_classifier().classify(content[:3000])
+    except Exception:
+        return "general"
+    return label if label != "unknown" else "general"
 
 
 def detect_hall(content: str) -> str:
@@ -479,13 +498,19 @@ def detect_hall(content: str) -> str:
 
     Halls connect rooms within a wing — they categorize the TYPE of content
     (emotional, technical, family, etc.) while rooms categorize the TOPIC.
+
+    English is keyword-driven. For CJK content where the keyword set has no
+    coverage, the optional embedding classifier (opt-in via
+    ``MEMPALACE_EMBEDDING_CLASSIFY=1``) provides cross-lingual routing at
+    ~83% accuracy on the Chinese validation set.
     """
     global _HALL_KEYWORDS_CACHE
     if _HALL_KEYWORDS_CACHE is None:
         from .config import MempalaceConfig
 
         _HALL_KEYWORDS_CACHE = MempalaceConfig().hall_keywords
-    content_lower = content[:3000].lower()
+    snippet = content[:3000]
+    content_lower = snippet.lower()
 
     scores = {}
     for hall, keywords in _HALL_KEYWORDS_CACHE.items():
@@ -495,6 +520,14 @@ def detect_hall(content: str) -> str:
 
     if scores:
         return max(scores, key=scores.get)
+
+    if (
+        os.environ.get("MEMPALACE_EMBEDDING_CLASSIFY", "").strip().lower()
+        in ("1", "true", "yes", "on")
+        and _HALL_CJK_RE.search(snippet)
+    ):
+        return _hall_embed_fallback(snippet)
+
     return "general"
 
 

@@ -11,6 +11,7 @@ import chromadb
 from .base import (
     BaseBackend,
     BaseCollection,
+    EmbedderIdentityMismatchError,
     GetResult,
     HealthStatus,
     PalaceNotFoundError,
@@ -19,6 +20,64 @@ from .base import (
     UnsupportedFilterError,
     _IncludeSpec,
 )
+
+
+def _resolve_embedding_function(model_name: Optional[str]):
+    """Return a ChromaDB ``EmbeddingFunction`` for ``model_name``, or ``None``.
+
+    Only models whose adapter we ship are resolved here; unrecognised names
+    return ``None`` so ChromaDB falls back to its default and existing
+    palaces keep working unchanged. Extend this dispatcher when adding new
+    adapters (e.g. bge-m3, multilingual-e5-base).
+    """
+    if not model_name:
+        return None
+    lowered = model_name.lower()
+    if "jina" in lowered:
+        # Late import so chromadb/transformers stay optional for callers that
+        # never opt into the custom embedding path.
+        from ..embedders.jina_v5 import JinaV5EmbeddingFunction
+
+        return JinaV5EmbeddingFunction(model_name=model_name, mode="document")
+    return None
+
+
+def _read_stored_embedding_model(collection, palace_path: str) -> Optional[str]:
+    """Return the collection's recorded embedding model, falling back to sidecar."""
+    stored_model = None
+    try:
+        stored_model = (collection.metadata or {}).get("embedding_model")
+    except Exception:
+        stored_model = None
+    if stored_model:
+        return stored_model
+    try:
+        from ..embedders.palace_meta import read_palace_embedding_model
+
+        return read_palace_embedding_model(palace_path)
+    except Exception:
+        return None
+
+
+def _bind_collection_embedding(client, collection_name: str, collection, model_name: Optional[str]):
+    """Return ``collection`` rebound to ``model_name`` when we know its embedder."""
+    embedding_function = _resolve_embedding_function(model_name)
+    if embedding_function is None:
+        return collection
+    return client.get_collection(collection_name, embedding_function=embedding_function)
+
+
+def _write_palace_sidecar(palace_path: str, model_name: str) -> None:
+    """Persist the human-readable palace sidecar, logging on failure only."""
+    try:
+        from ..embedders.palace_meta import write_palace_embedding_model
+
+        write_palace_embedding_model(palace_path, model_name)
+    except Exception:
+        logger.warning(
+            "Failed to write palace sidecar at %s", palace_path,
+            exc_info=True,
+        )
 
 logger = logging.getLogger(__name__)
 
@@ -530,15 +589,74 @@ class ChromaBackend(BaseBackend):
 
         client = self._client(palace_path)
         hnsw_space = "cosine"
+        requested_model: Optional[str] = None
         if options and isinstance(options, dict):
             hnsw_space = options.get("hnsw_space", hnsw_space)
+            requested_model = options.get("embedding_model") or None
+
+        existing = None
+        stored_model: Optional[str] = None
+        try:
+            existing = client.get_collection(collection_name)
+            stored_model = _read_stored_embedding_model(existing, palace_path)
+        except Exception:
+            existing = None
+            stored_model = None
+
+        if requested_model and stored_model and stored_model != requested_model:
+            raise EmbedderIdentityMismatchError(
+                f"palace {palace_path!r} collection {collection_name!r} was indexed "
+                f"with embedding model {stored_model!r}, but the caller requested "
+                f"{requested_model!r}. Re-mine with the original model or reset the "
+                f"palace before switching."
+            )
+
+        if requested_model and existing is not None and stored_model is None:
+            try:
+                existing_count = existing.count()
+            except Exception:
+                existing_count = 0
+            if existing_count > 0:
+                raise EmbedderIdentityMismatchError(
+                    f"palace {palace_path!r} collection {collection_name!r} already "
+                    f"contains {existing_count} records but has no recorded embedding "
+                    f"model. Refusing to attach requested model {requested_model!r} "
+                    f"because that could mix vector spaces. Re-mine or add explicit "
+                    f"metadata before switching."
+                )
+
+        effective_model = requested_model or stored_model
 
         if create:
+            if existing is not None:
+                if requested_model and stored_model is None:
+                    _write_palace_sidecar(palace_path, requested_model)
+                collection = _bind_collection_embedding(
+                    client, collection_name, existing, effective_model
+                )
+                return ChromaCollection(collection)
+
+            metadata = {"hnsw:space": hnsw_space}
+            if effective_model:
+                # Stamp the model identity on the collection so later opens
+                # (potentially in a different process/config) can detect a
+                # mismatch rather than silently mixing vector spaces.
+                metadata["embedding_model"] = effective_model
+            create_kwargs: dict = {"metadata": metadata}
+            embedding_function = _resolve_embedding_function(effective_model)
+            if embedding_function is not None:
+                create_kwargs["embedding_function"] = embedding_function
             collection = client.get_or_create_collection(
-                collection_name, metadata={"hnsw:space": hnsw_space}
+                collection_name, **create_kwargs
             )
+            if effective_model:
+                _write_palace_sidecar(palace_path, effective_model)
         else:
-            collection = client.get_collection(collection_name)
+            if existing is None:
+                existing = client.get_collection(collection_name)
+            collection = _bind_collection_embedding(
+                client, collection_name, existing, effective_model
+            )
         return ChromaCollection(collection)
 
     def close_palace(self, palace) -> None:
@@ -613,6 +731,7 @@ def _normalize_get_collection_args(args, kwargs):
         if collection_name is None:
             raise TypeError("collection_name is required")
         create = kwargs.pop("create", False)
+        options = kwargs.pop("options", None)
         if rest:
             create = rest.pop(0)
         if rest:
@@ -623,7 +742,7 @@ def _normalize_get_collection_args(args, kwargs):
             PalaceRef(id=palace_path, local_path=palace_path),
             collection_name,
             bool(create),
-            None,
+            options,
         )
 
     # Legacy kwargs-only (palace_path=..., collection_name=..., create=...)
@@ -631,13 +750,14 @@ def _normalize_get_collection_args(args, kwargs):
         palace_path = kwargs.pop("palace_path")
         collection_name = kwargs.pop("collection_name")
         create = kwargs.pop("create", False)
+        options = kwargs.pop("options", None)
         if kwargs:
             raise TypeError(f"unexpected kwargs: {sorted(kwargs)}")
         return (
             PalaceRef(id=palace_path, local_path=palace_path),
             collection_name,
             bool(create),
-            None,
+            options,
         )
 
     raise TypeError("get_collection requires palace= or a positional palace_path")

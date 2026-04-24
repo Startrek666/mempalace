@@ -25,24 +25,18 @@ from .palace import (
 )
 
 
-# Cached hall keywords — avoids re-reading config per drawer
-_HALL_KEYWORDS_CACHE = None
-
-
 def _detect_hall_cached(content: str) -> str:
-    """Route content to a hall using cached keywords. Same logic as miner.detect_hall."""
-    global _HALL_KEYWORDS_CACHE
-    if _HALL_KEYWORDS_CACHE is None:
-        from .config import MempalaceConfig
+    """Route content to a hall. Thin delegate to :func:`miner.detect_hall`.
 
-        _HALL_KEYWORDS_CACHE = MempalaceConfig().hall_keywords
-    content_lower = content[:3000].lower()
-    scores = {}
-    for hall, keywords in _HALL_KEYWORDS_CACHE.items():
-        score = sum(1 for kw in keywords if kw in content_lower)
-        if score > 0:
-            scores[hall] = score
-    return max(scores, key=scores.get) if scores else "general"
+    Previously this module maintained its own ``_HALL_KEYWORDS_CACHE`` that
+    duplicated ``miner.detect_hall``. Keeping two detectors in sync was
+    error-prone — in particular the CJK embedding fallback added for Chinese
+    support had to be applied in both places. The single source of truth now
+    lives in ``miner.detect_hall`` and this shim simply forwards.
+    """
+    from .miner import detect_hall
+
+    return detect_hall(content)
 
 
 # File types that might contain conversations

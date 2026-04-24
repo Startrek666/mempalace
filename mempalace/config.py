@@ -84,6 +84,7 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
 
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
+DEFAULT_EMBEDDING_MODEL = None
 
 DEFAULT_TOPIC_WINGS = [
     "emotions",
@@ -177,6 +178,19 @@ class MempalaceConfig:
         return self._file_config.get("collection_name", DEFAULT_COLLECTION_NAME)
 
     @property
+    def embedding_model(self):
+        """Configured embedding model name, or ``None`` to use Chroma defaults."""
+        env_val = os.environ.get("MEMPALACE_EMBEDDING_MODEL") or os.environ.get(
+            "MEMPAL_EMBEDDING_MODEL"
+        )
+        if env_val and env_val.strip():
+            return env_val.strip()
+        cfg_val = self._file_config.get("embedding_model", DEFAULT_EMBEDDING_MODEL)
+        if isinstance(cfg_val, str) and cfg_val.strip():
+            return cfg_val.strip()
+        return None
+
+    @property
     def people_map(self):
         """Mapping of name variants to canonical names."""
         if self._people_map_file.exists():
@@ -266,6 +280,7 @@ class MempalaceConfig:
             default_config = {
                 "palace_path": DEFAULT_PALACE_PATH,
                 "collection_name": DEFAULT_COLLECTION_NAME,
+                "embedding_model": DEFAULT_EMBEDDING_MODEL,
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": DEFAULT_HALL_KEYWORDS,
             }

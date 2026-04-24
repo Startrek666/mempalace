@@ -59,6 +59,21 @@ def load_lang(lang: str = "en") -> dict:
     return _strings
 
 
+def read_lang(lang: str = "en") -> dict:
+    """Read a language dictionary without mutating the active global locale."""
+    canonical = _canonical_lang(lang)
+    if canonical is None:
+        canonical = "en"
+    lang_file = _LANG_DIR / f"{canonical}.json"
+    try:
+        data = json.loads(lang_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        if canonical != "en":
+            return read_lang("en")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def t(key: str, **kwargs) -> str:
     """Get a translated string by dotted key. Supports {var} interpolation.
 

@@ -28,6 +28,28 @@ class SearchError(Exception):
 
 
 _TOKEN_RE = re.compile(r"\w{2,}", re.UNICODE)
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+# jieba is an optional dependency; probe once and cache the answer so BM25
+# stays hot on repeated queries. ``_jieba_cut`` is ``None`` when jieba is not
+# installed, which switches us back to the Latin-only regex path.
+_JIEBA_PROBED = False
+_jieba_cut = None
+
+
+def _get_jieba_cut():
+    """Return ``jieba.cut`` if importable, else ``None`` (probed lazily once)."""
+    global _JIEBA_PROBED, _jieba_cut
+    if _JIEBA_PROBED:
+        return _jieba_cut
+    _JIEBA_PROBED = True
+    try:
+        import jieba  # type: ignore
+
+        _jieba_cut = jieba.cut
+    except ImportError:
+        _jieba_cut = None
+    return _jieba_cut
 
 
 def _first_or_empty(results, key: str) -> list:
@@ -46,8 +68,29 @@ def _first_or_empty(results, key: str) -> list:
 
 
 def _tokenize(text: str) -> list:
-    """Lowercase + strip to alphanumeric tokens of length ≥ 2."""
-    return _TOKEN_RE.findall(text.lower())
+    """Lowercase + strip to alphanumeric tokens of length ≥ 2.
+
+    For CJK content (Chinese, Japanese, Korean) we additionally run
+    ``jieba.cut`` when the optional ``jieba`` dependency is installed. Without
+    word segmentation, BM25 treats every sentence as a single super-token and
+    keyword re-ranking silently degrades to near-zero — see the Chinese
+    integration report. When jieba is unavailable the function falls back to
+    the original Latin-regex behaviour unchanged.
+    """
+    lowered = text.lower()
+    tokens = _TOKEN_RE.findall(lowered)
+    cut = _get_jieba_cut() if _CJK_RE.search(text) else None
+    if cut is not None:
+        try:
+            cjk_tokens = [
+                t.strip() for t in cut(text, cut_all=False) if t and t.strip()
+            ]
+        except Exception:  # pragma: no cover - jieba should not raise
+            cjk_tokens = []
+        # Keep multi-character CJK terms; drop single characters which carry
+        # too little IDF to help ranking.
+        tokens.extend(t for t in cjk_tokens if len(t) >= 2 and _CJK_RE.search(t))
+    return tokens
 
 
 def _bm25_scores(

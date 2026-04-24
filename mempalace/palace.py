@@ -39,11 +39,25 @@ SKIP_DIRS = {
 
 _DEFAULT_BACKEND = ChromaBackend()
 
-# Schema version for drawer normalization. Bump when the normalization
-# pipeline changes in a way that existing drawers should be rebuilt to pick up
-# (e.g., new noise-stripping rules). `file_already_mined` treats drawers with
-# a missing or stale `normalize_version` as "not mined", so the next mine pass
-# silently rebuilds them — users don't need to manually erase + re-mine.
+
+def _resolve_collection_options(options=None):
+    """Merge caller options with configured defaults.
+
+    The custom embedding model is selected at the palace/config level, so most
+    legacy callers should not need to thread ``options={"embedding_model": ...}``
+    through every helper manually. Explicit caller-provided options still win.
+    """
+    merged = dict(options) if isinstance(options, dict) else {}
+    if "embedding_model" not in merged:
+        try:
+            from .config import MempalaceConfig
+
+            configured_model = MempalaceConfig().embedding_model
+        except Exception:
+            configured_model = None
+        if configured_model:
+            merged["embedding_model"] = configured_model
+    return merged or None
 #
 # v2 (2026-04): introduced strip_noise() for Claude Code JSONL; previous
 #               drawers stored system tags / hook chrome verbatim.
@@ -54,18 +68,25 @@ def get_collection(
     palace_path: str,
     collection_name: str = "mempalace_drawers",
     create: bool = True,
+    options=None,
 ):
     """Get the palace collection through the backend layer."""
     return _DEFAULT_BACKEND.get_collection(
         palace_path,
         collection_name=collection_name,
         create=create,
+        options=_resolve_collection_options(options),
     )
 
 
-def get_closets_collection(palace_path: str, create: bool = True):
+def get_closets_collection(palace_path: str, create: bool = True, options=None):
     """Get the closets collection — the searchable index layer."""
-    return get_collection(palace_path, collection_name="mempalace_closets", create=create)
+    return get_collection(
+        palace_path,
+        collection_name="mempalace_closets",
+        create=create,
+        options=options,
+    )
 
 
 CLOSET_CHAR_LIMIT = 1500  # fill closet until ~1500 chars, then start a new one
@@ -188,12 +209,37 @@ def build_closet_lines(source_file, drawer_ids, content, wing, room):
     )[:5]
     entity_str = ";".join(entities) if entities else ""
 
-    # Extract key phrases — action verbs + context
-    topics = []
-    for pattern in [
+    # Extract key phrases — action verbs + context. The English pattern is
+    # the historical default; additional per-language action patterns are
+    # pulled in from the i18n bundles enabled via ``entity_languages`` (for
+    # example ``zh-CN`` provides a CJK verb pattern). Loading is best-effort
+    # so a malformed/missing locale does not break closet construction.
+    _action_patterns = [
         r"(?:built|fixed|wrote|added|pushed|tested|created|decided|migrated|reviewed|deployed|configured|removed|updated)\s+[\w\s]{3,40}",
-    ]:
-        topics.extend(re.findall(pattern, window, re.IGNORECASE))
+    ]
+    try:
+        from .config import MempalaceConfig
+        from .i18n import read_lang
+
+        _cfg = MempalaceConfig()
+        for _lang in _cfg.entity_languages:
+            if _lang == "en":
+                continue
+            _locale = read_lang(_lang) or {}
+            _ap = (_locale.get("regex") or {}).get("action_pattern")
+            if _ap:
+                _action_patterns.append(_ap)
+    except Exception:
+        # i18n loading must never break closet construction.
+        pass
+
+    topics = []
+    for pattern in _action_patterns:
+        try:
+            topics.extend(re.findall(pattern, window, re.IGNORECASE))
+        except re.error:
+            # A bad locale pattern should not poison the rest of the pipeline.
+            continue
     # Also grab section headers if present
     for header in re.findall(r"^#{1,3}\s+(.{5,60})$", window, re.MULTILINE):
         topics.append(header.strip())

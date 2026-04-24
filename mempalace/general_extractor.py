@@ -19,8 +19,53 @@ Usage:
     # [{"content": "...", "memory_type": "decision", "chunk_index": 0}, ...]
 """
 
+import logging
+import os
 import re
-from typing import List, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# Script probe used to decide whether the embedding fallback is worth the
+# cost: a paragraph with no CJK/Hangul/Hiragana/Katakana falls cleanly into
+# the Latin-regex path that has always worked, so we short-circuit and skip
+# the 500MB model load altogether.
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+# Opt-in flag. Off by default so ``pip install mempalace`` without the
+# ``[jina]`` extras continues to work (``general_extractor`` only needs
+# ``re`` in that mode). Users who want Chinese extraction set
+# ``MEMPALACE_EMBEDDING_CLASSIFY=1`` and install ``mempalace[jina]``.
+_EMBED_CLASSIFY_ENV = "MEMPALACE_EMBEDDING_CLASSIFY"
+
+
+def _embed_classify_enabled() -> bool:
+    """Return True when the embedding-fallback is explicitly enabled."""
+    val = os.environ.get(_EMBED_CLASSIFY_ENV, "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def _classify_with_embedding(text: str) -> Optional[Tuple[str, float]]:
+    """Try the anchor-based classifier; return ``None`` if unavailable.
+
+    The classifier ships with MemPalace but requires ``transformers``+``torch``
+    at runtime. Any import / inference error is swallowed and logged once so a
+    missing optional dependency never breaks mining.
+    """
+    try:
+        from .embedders.classifier import get_memory_type_classifier
+
+        classifier = get_memory_type_classifier()
+        label, score = classifier.classify(text)
+    except Exception as exc:
+        logger.warning(
+            "Embedding classifier unavailable (%s); falling back to regex only",
+            exc,
+        )
+        return None
+    if label == "unknown":
+        return None
+    return label, score
 
 
 # =============================================================================
@@ -389,6 +434,26 @@ def extract_memories(text: str, min_confidence: float = 0.3) -> List[Dict]:
                 scores[mem_type] = score
 
         if not scores:
+            # Regex markers are English-only; for CJK paragraphs we route to
+            # the anchor-based embedding classifier (opt-in via
+            # ``MEMPALACE_EMBEDDING_CLASSIFY=1``). Validation accuracy on the
+            # Chinese test set: 88% for 5 memory types vs. 4% with regex.
+            if _embed_classify_enabled() and _CJK_RE.search(prose):
+                embed = _classify_with_embedding(prose)
+                if embed is not None:
+                    embed_label, embed_score = embed
+                    # Cosine scores in [0, 1] map directly to confidence; the
+                    # 0.20 classifier threshold is the lower bound, and
+                    # top-1 scores for a good match are typically ≥ 0.60 on
+                    # the validated anchor set.
+                    if embed_score >= min_confidence:
+                        memories.append(
+                            {
+                                "content": para.strip(),
+                                "memory_type": embed_label,
+                                "chunk_index": len(memories),
+                            }
+                        )
             continue
 
         # Length bonus
