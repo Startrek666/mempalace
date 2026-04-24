@@ -8,6 +8,17 @@ from typing import Any, Optional
 
 import chromadb
 
+# Import-for-side-effect: ``jina_v5`` registers ``JinaV5EmbeddingFunction`` into
+# ChromaDB's ``known_embedding_functions`` registry on import, so reopened
+# collections whose metadata recorded ``name="jina_v5"`` can reconstruct the
+# correct embedder instead of silently falling back to the default MiniLM one.
+# The import is cheap (model weights are lazy-loaded in ``_get_model``) and
+# skips gracefully if transformers/torch are absent.
+try:  # pragma: no cover - best-effort registration
+    from ..embedders import jina_v5 as _jina_v5_register  # noqa: F401
+except Exception:
+    pass
+
 from .base import (
     BaseBackend,
     BaseCollection,

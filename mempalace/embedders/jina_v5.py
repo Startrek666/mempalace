@@ -89,6 +89,17 @@ class JinaV5EmbeddingFunction(_ChromaEmbeddingFunction):  # type: ignore[misc]
             mode=config.get("mode", "document"),
         )
 
+    def default_space(self) -> str:
+        """Jina v5 vectors are L2-normalised; cosine is the correct distance."""
+        return "cosine"
+
+    def supported_spaces(self) -> List[str]:
+        return ["cosine", "l2", "ip"]
+
+    @staticmethod
+    def max_tokens() -> int:
+        return 32768
+
     # --- Model loading -----------------------------------------------------------
 
     def _get_model(self) -> Any:
@@ -155,3 +166,33 @@ class JinaV5EmbeddingFunction(_ChromaEmbeddingFunction):  # type: ignore[misc]
         if hasattr(vecs, "tolist"):
             return vecs.tolist()
         return [list(v) if not isinstance(v, list) else v for v in vecs]
+
+
+def _register_with_chromadb() -> None:
+    """Register ``JinaV5EmbeddingFunction`` in ChromaDB's EF registry.
+
+    ChromaDB 1.5+ serialises the embedder's ``name()`` into the collection
+    metadata and, on reopen, looks the class up in a global registry. If the
+    lookup fails it warns ``Could not reconstruct embedding function jina_v5``
+    and falls back to ``None`` — meaning any downstream code that opens the
+    collection without going through :class:`ChromaBackend` would write
+    vectors with ChromaDB's default ``all-MiniLM-L6-v2``, mixing vector
+    spaces. Registering on import keeps the on-disk representation round-trip
+    safe regardless of entry point.
+    """
+    try:  # pragma: no cover - exercised at import time
+        from chromadb.api import types as _chroma_types  # type: ignore
+    except Exception:
+        return
+    registry = getattr(_chroma_types, "known_embedding_functions", None)
+    if isinstance(registry, dict):
+        registry.setdefault("jina_v5", JinaV5EmbeddingFunction)
+    register_fn = getattr(_chroma_types, "register_embedding_function", None)
+    if callable(register_fn):
+        try:
+            register_fn(JinaV5EmbeddingFunction)
+        except Exception:
+            pass
+
+
+_register_with_chromadb()
