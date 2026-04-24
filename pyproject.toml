@@ -58,7 +58,7 @@ chinese = ["jieba>=0.42"]
 # Jina v5 nano multilingual embedding backend (backends/chroma.py). Loaded
 # lazily; only required when ``embedding_model`` points at a ``jinaai/...``
 # checkpoint in the palace metadata.
-jina = ["transformers>=4.57.0", "torch>=2.1.0"]
+jina = ["transformers>=4.57.0", "torch>=2.1.0", "peft>=0.11.0", "einops>=0.7.0"]
 
 [dependency-groups]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9"]
