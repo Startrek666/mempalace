@@ -171,28 +171,50 @@ class JinaV5EmbeddingFunction(_ChromaEmbeddingFunction):  # type: ignore[misc]
 def _register_with_chromadb() -> None:
     """Register ``JinaV5EmbeddingFunction`` in ChromaDB's EF registry.
 
-    ChromaDB 1.5+ serialises the embedder's ``name()`` into the collection
-    metadata and, on reopen, looks the class up in a global registry. If the
-    lookup fails it warns ``Could not reconstruct embedding function jina_v5``
-    and falls back to ``None`` — meaning any downstream code that opens the
-    collection without going through :class:`ChromaBackend` would write
-    vectors with ChromaDB's default ``all-MiniLM-L6-v2``, mixing vector
+    ChromaDB 1.x exposes the registry in ``chromadb.utils.embedding_functions``
+    (dict ``known_embedding_functions`` plus helper ``register_embedding_function``).
+    Older layouts occasionally re-exported it via ``chromadb.api.types``; we
+    try both locations so the registration works across minor versions.
+
+    Without this registration ChromaDB warns ``Could not reconstruct embedding
+    function jina_v5`` on reopen and falls back to ``None``. Any caller that
+    bypasses :class:`ChromaBackend.get_collection` would then write vectors
+    with ChromaDB's default ``all-MiniLM-L6-v2``, silently mixing vector
     spaces. Registering on import keeps the on-disk representation round-trip
     safe regardless of entry point.
     """
+    candidate_modules = []
     try:  # pragma: no cover - exercised at import time
-        from chromadb.api import types as _chroma_types  # type: ignore
+        from chromadb.utils import embedding_functions as _ef_mod  # type: ignore
+
+        candidate_modules.append(_ef_mod)
     except Exception:
+        pass
+    try:  # pragma: no cover - version shim
+        from chromadb.api import types as _api_types  # type: ignore
+
+        candidate_modules.append(_api_types)
+    except Exception:
+        pass
+
+    registered = False
+    for mod in candidate_modules:
+        register_fn = getattr(mod, "register_embedding_function", None)
+        if callable(register_fn):
+            try:
+                register_fn(JinaV5EmbeddingFunction)
+                registered = True
+                break
+            except Exception:
+                pass
+    if registered:
         return
-    registry = getattr(_chroma_types, "known_embedding_functions", None)
-    if isinstance(registry, dict):
-        registry.setdefault("jina_v5", JinaV5EmbeddingFunction)
-    register_fn = getattr(_chroma_types, "register_embedding_function", None)
-    if callable(register_fn):
-        try:
-            register_fn(JinaV5EmbeddingFunction)
-        except Exception:
-            pass
+    # Fallback: write the raw dict entry when the helper is unavailable or
+    # refused the class (e.g. stricter validation in newer releases).
+    for mod in candidate_modules:
+        registry = getattr(mod, "known_embedding_functions", None)
+        if isinstance(registry, dict):
+            registry.setdefault("jina_v5", JinaV5EmbeddingFunction)
 
 
 _register_with_chromadb()
